@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<title>Scientific Driving Simulator 3D</title>
+<style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#05050a;overflow:hidden;font-family:'Courier New',monospace}
+    canvas{display:block}
+    #telemetry{position:fixed;top:20px;left:20px;color:#0f0;font-size:12px;background:rgba(0,20,0,0.7);padding:10px;border:1px solid #0f0;pointer-events:none;z-index:20}
+</style>
+</head>
+<body>
+<div id="telemetry">
+    UNIT: Metric<br>
+    VELOCITY: <span id="v-val">0</span> m/s<br>
+    FORCE: <span id="f-val">0</span> N<br>
+    DRAG: <span id="d-val">0</span> N<br>
+    GRIP: <span id="g-val">100</span>%
+</div>
+<canvas id="c"></canvas>
+
+<script>
+"use strict";
+const C=document.getElementById('c'),X=C.getContext('2d');
+let W,H,T=0;
+function resize(){W=C.width=innerWidth;H=C.height=innerHeight}
+resize();addEventListener('resize',resize);
+
+/* ═══ 物理常數 (Scientific Constants) ═══ */
+const RHO = 1.225;      // 空氣密度 (kg/m^3)
+const CD = 0.3;         // 風阻係數 (跑車平均值)
+const AREA = 2.2;       // 迎風面積 (m^2)
+const MASS = 1500;      // 車重 (kg)
+const GRIP_LIMIT = 8.0; // 輪胎最大側向加速度 (m/s^2)
+
+const P = {
+    x: 2500, z: 2500, a: 0, 
+    v: 0,               // 線速度 (m/s)
+    engineForce: 0,     // 引擎推力 (N)
+    latG: 0             // 側向重力
+};
+
+let bldgs = [];
+const WW=5000, WH=5000, FOV=1.1;
+let keys = {}, state='play', cam={x:0,y:12,z:0,a:0,p:0.2};
+
+// 生成隨機城市建築
+for(let i=0; i<300; i++){
+    bldgs.push({x:Math.random()*WW, z:Math.random()*WH, w:50, d:50, h:100+Math.random()*200, col:'#2d2d3a'});
+}
+
+addEventListener('keydown',e=>keys[e.key.toLowerCase()]=true);
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+
+/* ═══ 核心物理引擎 (Scientific Engine) ═══ */
+function updatePhysics() {
+    // 1. 引擎出力 (模擬扭力曲線)
+    if(keys.w) P.engineForce = 8000; 
+    else if(keys.s) P.engineForce = -12000; // 強力剎車
+    else P.engineForce = 0;
+
+    // 2. 計算空氣阻力 Fd = 1/2 * rho * v^2 * Cd * A
+    let dragForce = 0.5 * RHO * Math.pow(P.v, 2) * CD * AREA;
+    if (P.v < 0) dragForce = -dragForce;
+
+    // 3. 滾動阻力 (基本摩擦)
+    let rollingResistance = P.v * 150;
+
+    // 4. 合力與加速度 a = F / m
+    let totalF = P.engineForce - dragForce - rollingResistance;
+    let acceleration = totalF / MASS;
+    P.v += acceleration;
+
+    // 5. 轉向與側向力 (Centripetal Force)
+    let steerAngle = 0;
+    if(keys.a) steerAngle = -0.03;
+    if(keys.d) steerAngle = 0.03;
+
+    // 速度越快，轉向越困難 (模擬真實物理)
+    let turnRadius = P.v > 1 ? (P.v / Math.abs(steerAngle)) : 1000;
+    P.latG = Math.pow(P.v, 2) / turnRadius; // a = v^2 / r
+
+    // 輪胎抓地力極限檢查
+    let gripFactor = 1.0;
+    if (P.latG > GRIP_LIMIT) {
+        gripFactor = GRIP_LIMIT / P.latG; // 發生側滑 (Drifting)
+        P.v *= 0.95; // 側滑會導致劇烈失速
+    }
+
+    P.a += steerAngle * (P.v * 0.05) * gripFactor;
+
+    // 6. 更新位置
+    P.x += Math.sin(P.a) * P.v;
+    P.z += Math.cos(P.a) * P.v;
+
+    // 更新儀表
+    document.getElementById('v-val').innerText = (P.v * 3.6).toFixed(1); // 轉 km/h
+    document.getElementById('f-val').innerText = Math.round(totalF);
+    document.getElementById('d-val').innerText = Math.round(dragForce);
+    document.getElementById('g-val').innerText = Math.round(gripFactor * 100);
+}
+
+/* ═══ 渲染邏輯 ═══ */
+function proj(wx,wy,wz){
+    const dx=wx-cam.x, dy=wy-cam.y, dz=wz-cam.z;
+    const ca=Math.cos(cam.a), sa=Math.sin(cam.a);
+    const cx=dx*ca-dz*sa, cz=dx*sa+dz*ca, cy=dy;
+    const cp=Math.cos(cam.p), sp=Math.sin(cam.p);
+    const rz=cy*sp+cz*cp;
+    if(rz<1) return null;
+    return {x:W/2+cx/rz*W*FOV, y:H/2-(cy*cp-cz*sp)/rz*W*FOV, d:rz};
+}
+
+function drawBox(bx,by,bz,bw,bh,bd,col){
+    const p = [
+        proj(bx,by,bz), proj(bx+bw,by,bz), proj(bx+bw,by,bz+bd), proj(bx,by,bz+bd),
+        proj(bx,by+bh,bz), proj(bx+bw,by+bh,bz), proj(bx+bw,by+bh,bz+bd), proj(bx,by+bh,bz+bd)
+    ];
+    if(p.some(v=>!v)) return;
+    X.fillStyle = col;
+    X.beginPath();
+    X.moveTo(p[4].x, p[4].y); X.lineTo(p[5].x, p[5].y);
+    X.lineTo(p[6].x, p[6].y); X.lineTo(p[7].x, p[7].y);
+    X.fill();
+    X.strokeStyle = "rgba(0,255,0,0.2)";
+    X.stroke();
+}
+
+function loop(ts){
+    X.fillStyle = "#05050a"; X.fillRect(0,0,W,H);
+    updatePhysics();
+
+    // 相機動態跟隨
+    cam.x = P.x - Math.sin(P.a) * 50;
+    cam.z = P.z - Math.cos(P.a) * 50;
+    cam.a = P.a;
+
+    let renderList = [];
+    bldgs.forEach(b => {
+        let dist = Math.hypot(b.x-P.x, b.z-P.z);
+        if(dist < 800) renderList.push({d:dist, f:()=>drawBox(b.x,0,b.z,b.w,b.h,b.d,b.col)});
+    });
+    // 玩家車輛 (簡化為方塊)
+    renderList.push({d:0, f:()=>drawBox(P.x-10,0,P.z-10,20,10,30,"#0f0")});
+
+    renderList.sort((a,b)=>b.d - a.d).forEach(obj => obj.f());
+    requestAnimationFrame(loop);
+}
+loop(0);
+</script>
+</body>
+</html>
